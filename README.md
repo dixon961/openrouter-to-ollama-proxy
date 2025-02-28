@@ -22,11 +22,9 @@ Follow these steps to set up the proxy locally:
 1.  **Clone the Repository**
 
     ```bash
-    git clone [https://github.com/yourusername/openrouter-to-ollama-proxy.git](https://www.google.com/search?q=https://github.com/yourusername/openrouter-to-ollama-proxy.git)
+    git clone [https://github.com/gagin/openrouter-to-ollama-proxy.git](https://www.google.com/search?q=https://github.com/gagin/openrouter-to-ollama-proxy.git)
     cd openrouter-to-ollama-proxy
     ```
-
-    Replace `yourusername` with your GitHub username.
 
 2.  **Install Dependencies**
 
@@ -92,28 +90,16 @@ Follow these steps to set up the proxy locally:
 
 ### Integrating with Open-WebUI
 
-1.  **Run Open-WebUI in Docker:**
+To use OpenRouter models within Open-WebUI:
 
-    ```bash
-    docker run -d -p 3000:8080 --add-host=host.docker.internal:host-gateway -v open-webui:/app/backend/data --name open-webui --restart always ghcr.io/open-webui/open-webui:main
-    ```
-
-2.  Open `http://localhost:3000` in your browser.
-3.  Navigate to **Settings > Model Provider**.
-4.  Set the **Base URL** to `http://host.docker.internal:11434`.
-5.  Save and reload the page. The model dropdown will list OpenRouter models.
-6.  Select a model and start chatting!
+1.  Ensure your Open-WebUI instance can access `http://localhost:11434` or `http://host.docker.internal:11434` (if running in Docker).
+2.  The model list in Open-WebUI should then display the list of models available from OpenRouter.
 
 ## Troubleshooting
 
 * **Proxy Logs:** Check the terminal running `node proxy.js` for request/response details.
 * **Open-WebUI Errors:** View logs with `docker logs open-webui`.
-* **Port Conflict:** If 11434 is taken (e.g., by Ollama), stop it:
-
-    ```bash
-    killall ollama
-    ```
-
+* **Port Conflict:** If 11434 is taken, identify and stop the conflicting service. If Ollama is running and you need to stop it, use the appropriate method for your system, as `killall ollama` might not prevent automatic restarts.
 * **API Key Issues:** Ensure `OPENROUTER_API_KEY` in `.env` is valid.
 
 ## Notes
