@@ -8,7 +8,6 @@ app.use(express.json());
 const localOllamaUrl = 'http://localhost:11435';
 const localModels = {
   chat: [
-    'nomic-embed-text:latest',
     'gemma3:1b',
     'SmolLM2:135m',
     'deepseek-r1:1.5b'

@@ -2,7 +2,7 @@
 
 This Node.js proxy bridges OpenRouter's API to tools expecting an Ollama server, such as Open-WebUI. It translates OpenRouter's OpenAI-compatible endpoints (e.g., `/v1/chat/completions`, `/v1/models`) into Ollama's API format (e.g., `/api/chat`, `/api/tags`), enabling seamless use of OpenRouter's models within Ollama-compatible clients.
 
-**Important Bypass Feature:** This proxy also allows for local Ollama model usage for specific endpoints and models. Embedding requests (`/api/embeddings`) and models listed in the `localModels` configuration will bypass OpenRouter and be handled by a local Ollama server running on port `11435`. This allows for a hybrid setup where you can use local models for specific tasks and OpenRouter for others.
+**Hybrid Local/OpenRouter Functionality:** This proxy addresses the challenge of OpenRouter's lack of native embedding endpoint support. It allows for a hybrid setup where embedding requests (`/api/embeddings`) and models listed in the `localModels` configuration will bypass OpenRouter and be handled by a local Ollama server running on port `11435`. This is particularly useful for tools like Weaviate's local setup ([https://weaviate.io/developers/weaviate/quickstart/local](https://weaviate.io/developers/weaviate/quickstart/local)) which require local Ollama compatibility for embeddings, even when your hardware limitations prevent running large language models locally for chat. You can continue to use OpenRouter for chat and other tasks, while relying on local Ollama for embedding models and other specified local models.
 
 ## Features
 
@@ -163,7 +163,6 @@ To use local models for specific chat models, modify the `localModels` object in
 ```javascript
 const localModels = {
   chat: [
-    'nomic-embed-text:latest',
     'gemma3:1b',
     'SmolLM2:135m',
     'deepseek-r1:1.5b'
