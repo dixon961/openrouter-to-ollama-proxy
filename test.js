@@ -1,8 +1,10 @@
 const axios = require('axios');
 
 const proxyUrl = 'http://localhost:11434';
-const embeddingModel = 'nomic-emb1ed-text';
-const geminiModel = 'google/gemini-2.0-flash-lite-001';
+const embeddingModel = 'nomic-embed-text';
+const geminiModel = 'google/gemini-2.0-flash-lite-001'; //'gemma3:1b';
+
+const useStreaming = true; // Set to true to test streaming, false for non-streaming
 
 async function getEmbedding(prompt) {
   const response = await axios.post(`${proxyUrl}/api/embeddings`, {
@@ -52,37 +54,93 @@ async function testEmbeddingModel() {
   }
 }
 
-async function testOpenRouterProxyAssessment(embeddingSimilarity) {
-  try {
-    const prompt = `The word embedding model "${embeddingModel}" produced a cosine similarity of ${embeddingSimilarity} when performing the queen - female + male test against king. Is this a good result? Answer in 15 words or less.`;
-    const response = await axios.post(`${proxyUrl}/api/chat`, {
-      model: geminiModel,
-      messages: [{ role: 'user', content: prompt }],
-    });
+async function testChatEndpoint(embeddingSimilarity) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const prompt = `The word embedding model "${embeddingModel}" produced a cosine similarity of ${embeddingSimilarity} when performing the queen - female + male test against king. Is this a good result? Answer in 15 words or less.`;
+      const response = await axios.post(
+        `${proxyUrl}/api/chat`,
+        {
+          model: geminiModel,
+          messages: [{ role: 'user', content: prompt }],
+          stream: useStreaming, // Use the configuration variable
+        },
+        {
+          responseType: useStreaming ? 'stream' : 'json', // Set responseType based on useStreaming
+        }
+      );
 
-    if (response.status === 200 && response.data && response.data.message && response.data.message.content) {
-      console.log(`\n--- OpenRouter proxy assessment test (${geminiModel}) test: PASS ---`);
-      console.log(`Q: ${prompt}`);
-      console.log(`A: ${response.data.message.content}`);
-    } else {
-      console.error(`\n--- OpenRouter proxy assessment test (${geminiModel}) test: FAIL ---`);
-      console.error(response.data);
+      if (useStreaming) {
+        // Streaming Logic
+        if (!response.data || !response.data.pipe) {
+          console.error("Response is not a stream, or is empty.");
+          reject(new Error("Response is not a stream"));
+          return;
+        }
+
+        console.log("Stage 1: Basic stream check passed.");
+
+        let fullResponse = "";
+        response.data.on('data', (chunk) => {
+          const lines = chunk.toString().split('\n').filter(line => line.trim() !== '');
+          lines.forEach(line => {
+            try {
+              const parsed = JSON.parse(line);
+              if (parsed.message && parsed.message.content) {
+                fullResponse += parsed.message.content;
+              }
+              if (parsed.done) {
+                console.log("Done flag found");
+              }
+            } catch (error) {
+              console.error('Error parsing stream chunk:', error.message);
+              console.log("Failed to parse:", line);
+            }
+          });
+        });
+
+        response.data.on('end', () => {
+          console.log(`\n--- Chat endpoint test (${geminiModel}) test: PASS ---`);
+          console.log(`Q: ${prompt}`);
+          console.log(`A: ${fullResponse}`);
+          resolve();
+        });
+
+        response.data.on('error', (error) => {
+          console.error(`\n--- Chat endpoint test (${geminiModel}) test: FAIL ---`);
+          console.error(error.message);
+          reject(error);
+        });
+      } else {
+        // Non-Streaming Logic
+        if (response.data && response.data.message && response.data.message.content) {
+          console.log(`\n--- Chat endpoint test (${geminiModel}) test: PASS ---`);
+          console.log(`Q: ${prompt}`);
+          console.log(`A: ${response.data.message.content}`);
+          resolve();
+        } else {
+          console.error(`\n--- Chat endpoint test (${geminiModel}) test: FAIL ---`);
+          console.error(response.data);
+          reject(new Error("Invalid response"));
+        }
+      }
+    } catch (error) {
+      console.error(`\n--- Chat endpoint test (${geminiModel}) test: FAIL ---`);
+      console.error(error.message);
+      if (error.response) {
+        console.error(error.response.data);
+      }
+      reject(error);
     }
-  } catch (error) {
-    console.error(`\n--- OpenRouter proxy assessment test (${geminiModel}) test: FAIL ---`);
-    console.error(error.message);
-    if (error.response) {
-      console.error(error.response.data);
-    }
-  }
+  });
 }
 
 async function runTests() {
   const embeddingSimilarity = await testEmbeddingModel();
   if (embeddingSimilarity !== null) {
-    await testOpenRouterProxyAssessment(embeddingSimilarity);
+    await testChatEndpoint(embeddingSimilarity);
   } else {
-    console.log("\n--- OpenRouter proxy assessment test: SKIPPED ---");
+    console.log("\n--- Chat endpoint test: SKIPPED ---");
     console.log("Skipped due to embedding model test failure.");
   }
 }
