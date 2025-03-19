@@ -17,45 +17,46 @@ const localModels = {
 };
 
 function shouldBypass(modelName, endpoint) {
-  return localModels[endpoint] && localModels[endpoint].includes(modelName);
+  // Strip the :latest suffix for comparison
+  const cleanModelName = modelName.replace(':latest', '');
+  const modelList = localModels[endpoint] || [];
+  
+  // Check both with and without :latest suffix for better matching
+  return modelList.some(m => m === modelName || m === cleanModelName || 
+                            m.replace(':latest', '') === cleanModelName);
 }
 
 async function forwardToOllama(req, res, endpoint) {
   try {
+    console.log(`Forwarding to local Ollama ${endpoint} for model: ${req.body.model}`);
+    
+    const isStreaming = req.body.stream === true;
     const localResponse = await axios.post(`${localOllamaUrl}/${endpoint}`, req.body, {
       responseType: 'stream',
     });
 
     let responseData = '';
-    let isStreaming = false;
+    let streamingStarted = false;
 
     localResponse.data.on('data', (chunk) => {
       const chunkString = chunk.toString();
-      responseData += chunkString;
-
-      if (!isStreaming) {
-        try {
-          JSON.parse(responseData);
-        } catch (jsonError) {
-          if (chunkString.includes('\n')) {
-            isStreaming = true;
-          }
-        }
-      }
-
+      
       if (isStreaming) {
-        const lines = responseData.split('\n').filter(line => line.trim() !== '');
-        responseData = '';
+        const lines = chunkString.split('\n').filter(line => line.trim() !== '');
         lines.forEach(line => {
           try {
             const parsed = JSON.parse(line);
-            res.write(JSON.stringify(parsed) + '\n'); // Add newline here
+            res.write(JSON.stringify(parsed) + '\n');
+            streamingStarted = true;
           } catch (error) {
-            if(line.trim() !== ''){
-                res.write(JSON.stringify({response: line}) + '\n'); // Add newline here
+            if (line.trim() !== '') {
+              res.write(JSON.stringify({response: line}) + '\n');
+              streamingStarted = true;
             }
           }
         });
+      } else {
+        responseData += chunkString;
       }
     });
 
@@ -67,57 +68,92 @@ async function forwardToOllama(req, res, endpoint) {
         } catch (error) {
           res.json({response: responseData});
         }
-      } else {
+      } else if (streamingStarted) {
         res.end();
+      } else {
+        res.json({
+          model: req.body.model,
+          created_at: new Date().toISOString(),
+          message: { role: 'assistant', content: 'No content returned' },
+          done: true
+        });
       }
     });
 
     localResponse.data.on('error', (error) => {
-      console.error('Error in Ollama response:', error);
+      console.error(`Local Ollama ${endpoint} error [500]:`, error.message);
       res.status(500).json({ error: 'Error processing Ollama response' });
     });
 
   } catch (localError) {
-    console.error(`Error forwarding to local Ollama ${endpoint}:`, localError.message);
+    const errorMsg = localError.response?.data?.error || localError.message || 'Unknown error';
     if (localError.response) {
-      console.error(`Local Ollama ${endpoint} response:`, JSON.stringify(localError.response.data, null, 2));
-      if (localError.response.status === 404 && localError.response.data && localError.response.data.error && localError.response.data.error.includes("model")) {
-        return res.status(400).json({ error: `Model "${req.body.model}" not found on Ollama server.` });
+      const status = localError.response.status;
+      if (status === 404 || (errorMsg && errorMsg.includes("model"))) {
+        console.error(`Local Ollama ${endpoint} error [404]: Model not found`);
+        return res.status(404).json({ error: `Model "${req.body.model}" not found on Ollama server` });
       }
+      console.error(`Local Ollama ${endpoint} error [${status}]:`, errorMsg);
+      return res.status(status || 500).json({ error: errorMsg || 'Ollama server error' });
     } else if (localError.code === 'ECONNREFUSED') {
+      console.error(`Local Ollama ${endpoint} error [503]: Server unavailable`);
       return res.status(503).json({ error: 'Ollama server unavailable' });
+    } else if (localError.code === 'ECONNRESET' || localError.message.includes('socket hang up')) {
+      console.error(`Local Ollama ${endpoint} error [404]: Model not found or server error`);
+      return res.status(404).json({ error: `Model "${req.body.model}" not found on Ollama server or server error` });
     }
-    res.status(500).json({ error: `Error forwarding to local Ollama ${endpoint}` });
+    console.error(`Local Ollama ${endpoint} error [500]:`, errorMsg);
+    return res.status(500).json({ error: `Error forwarding to local Ollama ${endpoint}: ${errorMsg}` });
   }
 }
 
 async function forwardToOpenRouter(req, res, endpoint) {
+  const isStreaming = req.body.stream === true;
+
   try {
+    const modelName = req.body.model ? req.body.model.replace(':latest', '') : undefined;
+    console.log(`Forwarding to OpenRouter for model: ${modelName}`);
+    
     const openRouterRequest = {
       ...req.body,
-      model: req.body.model ? req.body.model.replace(':latest', '') : undefined,
+      model: modelName,
     };
 
-    if (endpoint === 'api/chat' && req.body.stream) {
+    if (isStreaming) {
       const streamResponse = await axios({
         method: 'post',
         url: 'https://openrouter.ai/api/v1/chat/completions',
         data: openRouterRequest,
-        headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` },
+        headers: { 
+          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
         responseType: 'stream',
       });
 
-      let fullContent = '';
       streamResponse.data.on('data', (chunk) => {
         const lines = chunk.toString().split('\n').filter((line) => line.trim());
         for (const line of lines) {
           if (line.startsWith('data: ')) {
             const data = line.slice(6);
-            if (data === '[DONE]') continue;
+            if (data === '[DONE]') {
+              const doneMessage = { model: req.body.model, done: true };
+              res.write(JSON.stringify(doneMessage) + '\n');
+              continue;
+            }
             try {
               const parsed = JSON.parse(data);
-              if (parsed.choices && parsed.choices[0].delta && parsed.choices[0].delta.content) {
-                fullContent += parsed.choices[0].delta.content;
+              if (parsed.choices && parsed.choices[0].delta) {
+                const ollamaChunk = {
+                  model: req.body.model,
+                  created_at: new Date().toISOString(),
+                  message: {
+                    role: 'assistant',
+                    content: parsed.choices[0].delta.content || ''
+                  },
+                  done: false
+                };
+                res.write(JSON.stringify(ollamaChunk) + '\n');
               }
             } catch (e) {
               console.error('Error parsing stream chunk:', e.message);
@@ -126,24 +162,17 @@ async function forwardToOpenRouter(req, res, endpoint) {
         }
       });
 
-      streamResponse.data.on('end', () => {
-        const ollamaResponse = {
-          model: req.body.model,
-          created_at: new Date().toISOString(),
-          message: { role: 'assistant', content: fullContent || 'No content returned' },
-          done: true,
-        };
-        console.log(`Sending ${endpoint} response (streamed):`, JSON.stringify(ollamaResponse, null, 2));
-        res.json(ollamaResponse);
-      });
-
+      streamResponse.data.on('end', () => res.end());
       streamResponse.data.on('error', (error) => {
         console.error('Error in stream:', error.message);
         res.status(500).json({ error: `Error processing stream: ${error.message}` });
       });
     } else {
       const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', openRouterRequest, {
-        headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` },
+        headers: { 
+          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
       });
 
       if (!response.data.choices || !Array.isArray(response.data.choices) || response.data.choices.length === 0) {
@@ -153,34 +182,89 @@ async function forwardToOpenRouter(req, res, endpoint) {
       const ollamaResponse = {
         model: req.body.model,
         created_at: new Date().toISOString(),
-        message: { role: 'assistant', content: response.data.choices[0].message.content || 'No content returned' },
+        message: { 
+          role: 'assistant', 
+          content: response.data.choices[0].message.content || 'No content returned' 
+        },
         done: true,
       };
-      console.log(`Sending ${endpoint} response:`, JSON.stringify(ollamaResponse, null, 2));
       res.json(ollamaResponse);
     }
   } catch (openRouterError) {
     console.error(`Error forwarding to OpenRouter ${endpoint}:`, openRouterError.message);
     if (openRouterError.response) {
-      console.error(`Openrouter ${endpoint} response:`, JSON.stringify(openRouterError.response.data, null, 2));
-      let errorMessage = openRouterError.response.data.error;
-      if (typeof errorMessage === 'object' && errorMessage !== null) {
-        errorMessage = JSON.stringify(errorMessage);
+      const responseData = openRouterError.response.data;
+      const errorDetail = responseData?.error || responseData?.message || 'Unknown error';
+      
+      // Concise logging: status and error message only
+      console.error(`OpenRouter ${endpoint} error [${openRouterError.response.status}]:`, errorDetail);
+
+      const status = openRouterError.response.status;
+      if (status === 400 || status === 404) {
+        const errorResponse = { 
+          error: `Model "${req.body.model}" not found on OpenRouter` 
+        };
+        if (isStreaming) {
+          res.write(JSON.stringify({
+            model: req.body.model,
+            created_at: new Date().toISOString(),
+            message: { role: 'assistant', content: errorResponse.error },
+            done: true
+          }) + '\n');
+          res.end();
+        } else {
+          res.status(404).json(errorResponse);
+        }
+        return;
       }
-      return res.status(500).json({ error: `Error forwarding to OpenRouter ${endpoint}: ${errorMessage || openRouterError.message}` });
+
+      const detailedError = typeof errorDetail === 'object' ? JSON.stringify(errorDetail) : errorDetail;
+      if (isStreaming) {
+        res.write(JSON.stringify({
+          model: req.body.model,
+          created_at: new Date().toISOString(),
+          message: { role: 'assistant', content: `OpenRouter error: ${detailedError}` },
+          done: true
+        }) + '\n');
+        res.end();
+      } else {
+        res.status(status || 500).json({ error: `OpenRouter error: ${detailedError}` });
+      }
+      return;
     }
-    return res.status(500).json({ error: `Error forwarding to OpenRouter ${endpoint}: ${openRouterError.message}` });
+    const networkError = openRouterError.code === 'ECONNREFUSED' || openRouterError.message.includes('socket hang up')
+      ? 'OpenRouter server unavailable'
+      : `Error forwarding to OpenRouter ${endpoint}: ${openRouterError.message}`;
+    console.error(`OpenRouter ${endpoint} network error:`, networkError);
+    if (isStreaming) {
+      res.write(JSON.stringify({
+        model: req.body.model,
+        created_at: new Date().toISOString(),
+        message: { role: 'assistant', content: networkError },
+        done: true
+      }) + '\n');
+      res.end();
+    } else {
+      res.status(503).json({ error: networkError });
+    }
   }
 }
 
 function handleRoute(req, res, endpoint) {
   console.log(`Received ${endpoint} request:`, JSON.stringify(req.body, null, 2));
+  
   try {
-    if (endpoint === 'api/embeddings') {
-      forwardToOllama(req, res, endpoint);
-    } else if (req.body.model && shouldBypass(req.body.model, endpoint.split('/')[1])) {
-      forwardToOllama(req, res, endpoint);
+    // Extract the base endpoint type (chat, embeddings)
+    const baseEndpoint = endpoint.split('/').pop();
+    
+    if (baseEndpoint === 'embeddings') {
+      // All embedding requests go to local Ollama
+      forwardToOllama(req, res, 'api/embeddings');
+    } else if (req.body.model && shouldBypass(req.body.model, 'chat')) {
+      // Model is in the bypass list, send to local Ollama
+      forwardToOllama(req, res, 'api/chat');
     } else {
+      // Otherwise, send to OpenRouter
       forwardToOpenRouter(req, res, endpoint);
     }
   } catch (error) {
@@ -199,6 +283,7 @@ app.get('/api/tags', async (req, res) => {
     const response = await axios.get('https://openrouter.ai/api/v1/models', {
       headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` },
     });
+    
     const openRouterModels = {
       models: response.data.data.map((model) => ({
         model: `${model.id}:latest`,
@@ -208,6 +293,7 @@ app.get('/api/tags', async (req, res) => {
         digest: 'n/a',
       })),
     };
+    
     console.log('Sending /api/tags response:', JSON.stringify(openRouterModels, null, 2));
     res.json(openRouterModels);
   } catch (error) {
