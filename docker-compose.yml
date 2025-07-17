@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  openrouter-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openrouter-proxy
+    ports:
+      - "11435:11434"
+    environment:
+      - OPENROUTER_API_KEY=CHANGE_KEY_HERE
+    restart: unless-stopped
